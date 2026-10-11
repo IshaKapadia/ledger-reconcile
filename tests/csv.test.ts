@@ -81,6 +81,13 @@ describe('parseStatementCsv', () => {
     expect(parseStatementCsv(padded)[0].amount).toBe(1500);
   });
 
+  // Every other amount here is a whole rupee, so without this one a
+  // regression that dropped the decimals altogether would pass the suite.
+  it('keeps the paise on a grouped amount', () => {
+    const grouped = ['Date,Narration,Withdrawal,Deposit', '2026-04-12,FEE,"1,234.560",'].join('\n');
+    expect(parseStatementCsv(grouped)[0].amount).toBe(1234.56);
+  });
+
   it('refuses an amount finer than a paisa rather than rounding it', () => {
     const subPaisa = ['Date,Narration,Withdrawal,Deposit', '2026-04-12,FEE,8.295,'].join('\n');
     expect(() => parseStatementCsv(subPaisa)).toThrow(CsvParseError);

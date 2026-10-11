@@ -159,6 +159,18 @@ describe('POST /api/reconcile', () => {
     });
   });
 
+  it('accepts a null reference, which is what an export means by "none"', async () => {
+    await withServer({}, async (baseUrl) => {
+      const res = await postJson(baseUrl, '/api/reconcile', {
+        csv,
+        ledger: [{ ...ledger[0], reference: null }],
+      });
+      expect(res.status).toBe(200);
+      // Still reconciles, on amount and narration rather than on reference.
+      expect((await json(res)).summary).toMatchObject({ matched: 1 });
+    });
+  });
+
   it('answers 400, not 500, for a ledger reference that is not a string', async () => {
     // matchesByReference calls .trim() on it, so a number used to reach the
     // matcher and come back as a 500 on a plainly malformed request.

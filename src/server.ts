@@ -118,8 +118,16 @@ function requireLedger(value: unknown, maxEntries: number): LedgerEntry[] {
     // Optional, but if present it has to be a string: `matchesByReference`
     // calls `.trim()` on it, so a number here is a TypeError inside the
     // matcher — a 500 for what is plainly a malformed request.
-    const { reference } = entry as Partial<LedgerEntry>;
-    if (reference !== undefined && typeof reference !== 'string') {
+    //
+    // `null` is not malformed, though. It is what a database export produces
+    // for an entry with no reference, and the matcher already treats it as
+    // absent. Rejecting it would turn a ledger that reconciled yesterday into
+    // a 400, so it is normalised to absent here instead, which also keeps the
+    // value honest against `LedgerEntry.reference?: string`.
+    const record = entry as Record<string, unknown>;
+    if (record.reference === null) {
+      delete record.reference;
+    } else if (record.reference !== undefined && typeof record.reference !== 'string') {
       throw new HttpError(400, `ledger[${index}].reference must be a string when present.`);
     }
   });
