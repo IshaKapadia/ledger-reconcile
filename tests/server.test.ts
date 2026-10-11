@@ -1,18 +1,16 @@
 import type { AddressInfo } from 'net';
 import type { Server } from 'http';
-import { createServer, ServerOptions } from '../src/server';
+import express, { Express } from 'express';
+import { createServer, errorHandler, ServerOptions } from '../src/server';
 
 /**
  * The server is exercised over a real socket on an ephemeral port rather than
  * through a test-only request helper, so the body parsers, the route and the
  * error middleware all run exactly as they do in production.
  */
-async function withServer<T>(
-  options: ServerOptions,
-  run: (baseUrl: string) => Promise<T>
-): Promise<T> {
+async function withApp<T>(app: Express, run: (baseUrl: string) => Promise<T>): Promise<T> {
   const server: Server = await new Promise((resolve) => {
-    const s = createServer(options).listen(0, '127.0.0.1', () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   try {
     const { port } = server.address() as AddressInfo;
@@ -21,6 +19,9 @@ async function withServer<T>(
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 }
+
+const withServer = <T,>(options: ServerOptions, run: (baseUrl: string) => Promise<T>) =>
+  withApp(createServer(options), run);
 
 /** `Response.json()` is typed as `unknown` under Node's fetch types. */
 async function json(res: { json(): Promise<unknown> }): Promise<any> {
@@ -108,12 +109,74 @@ describe('POST /api/reconcile', () => {
     });
   });
 
-  it('never returns a stack trace', async () => {
-    await withServer({}, async (baseUrl) => {
-      const res = await postJson(baseUrl, '/api/reconcile', { csv: 42, ledger });
-      const body = await json(res);
-      expect(body.stack).toBeUndefined();
-      expect(JSON.stringify(body)).not.toContain('src/server');
+  it('counts rows the way the parser splits them, including a bare CR', async () => {
+    await withServer({ maxStatementLines: 5 }, async (baseUrl) => {
+      // Classic-Mac line endings. Counting only "\n" would see one row here
+      // and wave a twenty-row statement straight through the bound.
+      const long = ['Date,Narration,Withdrawal,Deposit']
+        .concat(Array.from({ length: 20 }, (_, i) => `2026-04-10,ROW ${i},1,`))
+        .join('\r');
+      const res = await postJson(baseUrl, '/api/reconcile', { csv: long, ledger });
+      expect(res.status).toBe(413);
+    });
+  });
+
+  it('answers 413 for a ledger beyond the entry limit', async () => {
+    await withServer({ maxLedgerEntries: 5 }, async (baseUrl) => {
+      const many = Array.from({ length: 20 }, (_, i) => ({ ...ledger[0], id: `L${i}` }));
+      const res = await postJson(baseUrl, '/api/reconcile', { csv, ledger: many });
+      expect(res.status).toBe(413);
+      expect((await json(res)).error).toMatch(/Ledger has 20 entries/);
+    });
+  });
+});
+
+describe('errorHandler', () => {
+  /**
+   * The real routes validate their input, so every failure they can produce is
+   * a 4xx — posting bad input never reaches the 500 branch and so proves
+   * nothing about it. The handler is mounted here behind a route that throws
+   * on purpose, which is the only way to actually see what a caller is told
+   * when something unexpected goes wrong.
+   */
+  it('returns no stack trace or internal message on an unexpected error', async () => {
+    const app = express();
+    app.post('/boom', () => {
+      const err = new Error('ENOENT: /srv/ledger-reconcile/src/server.ts missing');
+      err.stack = 'Error: secret\n    at /srv/ledger-reconcile/src/server.ts:1:1';
+      throw err;
+    });
+    app.use(errorHandler);
+
+    const logged = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await withApp(app, async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/boom`, { method: 'POST' });
+        expect(res.status).toBe(500);
+        const body = await json(res);
+        expect(body).toEqual({ error: 'Internal Server Error' });
+        expect(JSON.stringify(body)).not.toContain('src/server');
+        expect(JSON.stringify(body)).not.toContain('ENOENT');
+      });
+      // It is not silently swallowed either — the operator still gets it.
+      expect(logged).toHaveBeenCalled();
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it('keeps a 4xx status and its message', async () => {
+    const app = express();
+    app.post('/bad', () => {
+      throw Object.assign(new Error('entity too large'), { status: 413 });
+    });
+    app.use(errorHandler);
+
+    await withApp(app, async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/bad`, { method: 'POST' });
+      expect(res.status).toBe(413);
+      // Not an HttpError, so the message is replaced rather than echoed back.
+      expect((await json(res)).error).toBe('Payload Too Large');
     });
   });
 });
@@ -143,6 +206,16 @@ describe('POST /api/parse', () => {
 describe('authentication', () => {
   it('rejects a request with no bearer token when one is configured', async () => {
     await withServer({ apiToken: 'secret' }, async (baseUrl) => {
+      const res = await postJson(baseUrl, '/api/reconcile', { csv, ledger });
+      expect(res.status).toBe(401);
+    });
+  });
+
+  it('turns an anonymous caller away before buffering their body', async () => {
+    // The limit is smaller than the body, so the body parser would answer 413
+    // if it ran first. A 401 is the proof that the token is checked before any
+    // of the request is read or parsed on an anonymous caller's behalf.
+    await withServer({ apiToken: 'secret', bodyLimit: '1b' }, async (baseUrl) => {
       const res = await postJson(baseUrl, '/api/reconcile', { csv, ledger });
       expect(res.status).toBe(401);
     });

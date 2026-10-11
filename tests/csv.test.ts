@@ -76,9 +76,18 @@ describe('parseStatementCsv', () => {
     });
   });
 
-  it('keeps an amount exact to the paisa', () => {
-    const paise = ['Date,Narration,Withdrawal,Deposit', '2026-04-12,FEE,8.29,'].join('\n');
-    expect(parseStatementCsv(paise)[0].amount).toBe(8.29);
+  // `Number('8.29') === 8.29`, so asserting that on a bare "8.29" would pass
+  // whatever the parser did with the paise. These two put the decimal behind
+  // something that has to be undone first, and pin the boundary at a paisa.
+  it('keeps the paise on a grouped amount', () => {
+    const grouped = ['Date,Narration,Withdrawal,Deposit', '2026-04-12,FEE,"1,234.56",'].join('\n');
+    expect(parseStatementCsv(grouped)[0].amount).toBe(1234.56);
+  });
+
+  it('refuses an amount finer than a paisa rather than rounding it', () => {
+    const subPaisa = ['Date,Narration,Withdrawal,Deposit', '2026-04-12,FEE,8.295,'].join('\n');
+    expect(() => parseStatementCsv(subPaisa)).toThrow(CsvParseError);
+    expect(() => parseStatementCsv(subPaisa)).toThrow(/more precision than a paisa/);
   });
 
   it('treats a negative withdrawal as a reversal, not a zero credit', () => {
@@ -143,6 +152,28 @@ describe('parseStatementCsv', () => {
         '2026-04-10,ODD ROW,n/a,',
       ].join('\n');
       expect(() => parseStatementCsv(text)).toThrow(/is not an amount/);
+    });
+
+    it('counts the line in the file, not the position after blanks are dropped', () => {
+      const withBlank = [
+        'Date,Narration,Withdrawal,Deposit',
+        '2026-04-10,UPI/ACME,1500,',
+        '',
+        '2026-04-30,CLOSING BALANCE,,',
+      ].join('\n');
+      // Dropping the blank line puts the bad row third in the array; it is the
+      // fourth line of the file, and that is the one somebody has to open.
+      expect(() => parseStatementCsv(withBlank)).toThrow(/Row 4: no amount/);
+    });
+
+    it('counts a narration that spans lines as the line it started on', () => {
+      const wrapped = [
+        'Date,Narration,Withdrawal,Deposit',
+        '2026-04-10,"UPI/ACME',
+        'SUPPLIES",1500,',
+        '2026-04-30,CLOSING BALANCE,,',
+      ].join('\n');
+      expect(() => parseStatementCsv(wrapped)).toThrow(/Row 4: no amount/);
     });
 
     it('refuses a row with a blank date', () => {

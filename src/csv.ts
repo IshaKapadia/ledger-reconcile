@@ -40,6 +40,13 @@ const COLUMN_ALIASES: Record<CanonicalColumn, string[]> = {
   reference: ['utr', 'chq/ref no', 'reference', 'ref no'],
 };
 
+/** A tokenised row, carrying the line of the file it started on. */
+export interface CsvRow {
+  fields: string[];
+  /** 1-based line in the original text, for error messages. */
+  line: number;
+}
+
 /**
  * Tokenise CSV text into rows of fields.
  *
@@ -47,12 +54,30 @@ const COLUMN_ALIASES: Record<CanonicalColumn, string[]> = {
  * because a narration may legitimately contain a line break inside a quoted
  * field. Splitting on newlines up front cuts such a row in half: the first
  * part loses its amount columns and the remainder arrives as a phantom row.
+ *
+ * Each row remembers the line it began on. Blank rows are dropped, and a
+ * quoted narration can span several lines, so a row's position in the returned
+ * array is not its position in the file — and an error message that quotes the
+ * wrong line sends somebody to the wrong row of a thousand-row statement.
  */
-export function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
+export function scanCsv(text: string): CsvRow[] {
+  const rows: CsvRow[] = [];
+  let fields: string[] = [];
   let field = '';
   let inQuotes = false;
+  let line = 1;
+  let rowStartLine = 1;
+
+  const endRow = () => {
+    fields.push(field.trim());
+    field = '';
+    // Drop rows that are entirely empty — a trailing newline, or a blank
+    // separator line in the middle of a hand-edited export.
+    if (fields.some((value) => value !== '')) {
+      rows.push({ fields, line: rowStartLine });
+    }
+    fields = [];
+  };
 
   for (let i = 0; i < text.length; i++) {
     const char = text[i];
@@ -66,6 +91,9 @@ export function parseCsv(text: string): string[][] {
           inQuotes = false;
         }
       } else {
+        if (char === '\n' || (char === '\r' && text[i + 1] !== '\n')) {
+          line++;
+        }
         field += char;
       }
       continue;
@@ -74,27 +102,27 @@ export function parseCsv(text: string): string[][] {
     if (char === '"') {
       inQuotes = true;
     } else if (char === ',') {
-      row.push(field.trim());
+      fields.push(field.trim());
       field = '';
     } else if (char === '\n' || char === '\r') {
       if (char === '\r' && text[i + 1] === '\n') {
         i++;
       }
-      row.push(field.trim());
-      field = '';
-      rows.push(row);
-      row = [];
+      endRow();
+      line++;
+      rowStartLine = line;
     } else {
       field += char;
     }
   }
 
-  row.push(field.trim());
-  rows.push(row);
+  endRow();
+  return rows;
+}
 
-  // Drop rows that are entirely empty — a trailing newline, or a blank
-  // separator line in the middle of a hand-edited export.
-  return rows.filter((fields) => fields.some((value) => value !== ''));
+/** Tokenise CSV text into rows of fields, discarding line positions. */
+export function parseCsv(text: string): string[][] {
+  return scanCsv(text).map((row) => row.fields);
 }
 
 /** Split a single CSV line, honouring double-quoted fields. */
@@ -130,18 +158,23 @@ function resolveColumns(header: string[]): Partial<Record<CanonicalColumn, numbe
  * are stripped before parsing: `parseFloat` stops at the first comma and would
  * read that figure as 1.
  *
- * The result goes through `round2` so the value carried forward is exact to
- * the paisa, for the same reason the rest of the library does its arithmetic
- * that way — a raw float read here would undo it at the import boundary.
+ * Anything finer than a paisa is rejected rather than rounded. Rounding here
+ * would be the import boundary quietly changing a figure the bank printed, and
+ * the run would then reconcile against a number that is not on the statement;
+ * two decimal places is the whole of what a rupee amount can carry, so a third
+ * means the file is not what this parser thinks it is.
  */
 function parseAmount(raw: string | undefined, column: string, rowNumber: number): number {
   const text = (raw ?? '').replace(/[\s,₹]/g, '');
   if (text === '') {
     return 0;
   }
-  if (!/^-?\d+(\.\d+)?$/.test(text)) {
+  if (!/^-?\d+(\.\d{1,2})?$/.test(text)) {
+    const reason = /^-?\d+\.\d{3,}$/.test(text)
+      ? 'carries more precision than a paisa'
+      : 'is not an amount';
     throw new CsvParseError(
-      `Row ${rowNumber}: ${column} is not an amount (${JSON.stringify(raw)}).`
+      `Row ${rowNumber}: ${column} ${reason} (${JSON.stringify(raw)}).`
     );
   }
   return round2(Number(text));
@@ -162,12 +195,12 @@ function requireField(
 
 /** Parse a statement CSV into statement lines. */
 export function parseStatementCsv(csv: string): StatementLine[] {
-  const rows = parseCsv(csv);
+  const rows = scanCsv(csv);
   if (rows.length === 0) {
     return [];
   }
 
-  const columns = resolveColumns(rows[0]);
+  const columns = resolveColumns(rows[0].fields);
 
   // Without these there is nothing to reconcile on, and every row would
   // otherwise come out holding `undefined` where the type promises a string —
@@ -185,15 +218,14 @@ export function parseStatementCsv(csv: string): StatementLine[] {
   if (missing.length > 0) {
     throw new CsvParseError(
       `Statement is missing required column(s): ${missing.join(', ')}. ` +
-        `Header was: ${rows[0].join(', ')}`
+        `Header was: ${rows[0].fields.join(', ')}`
     );
   }
 
   const parsed: StatementLine[] = [];
 
   for (let i = 1; i < rows.length; i++) {
-    const fields = rows[i];
-    const rowNumber = i + 1;
+    const { fields, line: rowNumber } = rows[i];
 
     const debit = parseAmount(
       columns.debit === undefined ? '' : fields[columns.debit],
@@ -228,7 +260,9 @@ export function parseStatementCsv(csv: string): StatementLine[] {
       columns.reference === undefined ? undefined : fields[columns.reference] || undefined;
 
     parsed.push({
-      id: `csv-${i}`,
+      // Keyed on the line of the file, so an id points at something a person
+      // can find in the statement they uploaded.
+      id: `csv-${rowNumber}`,
       date: requireField(fields, columns.date, 'date', rowNumber),
       description: requireField(fields, columns.description, 'narration', rowNumber),
       amount: Math.abs(net),

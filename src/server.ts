@@ -32,6 +32,8 @@ export interface ServerOptions {
   bodyLimit?: string;
   /** Largest statement accepted, in rows. */
   maxStatementLines?: number;
+  /** Largest ledger accepted, in entries. */
+  maxLedgerEntries?: number;
 }
 
 /**
@@ -50,6 +52,14 @@ const DEFAULT_BODY_LIMIT = '10mb';
  */
 const DEFAULT_MAX_STATEMENT_LINES = 50_000;
 
+/**
+ * `reconcile` walks the ledger once per statement line, so the work is the
+ * product of the two sides. Bounding only the statement leaves the other half
+ * of that product open: a one-row statement with a million ledger entries is a
+ * small body that still takes the event loop away from everyone else.
+ */
+const DEFAULT_MAX_LEDGER_ENTRIES = 50_000;
+
 function requireString(value: unknown, field: string): string {
   if (typeof value !== 'string') {
     throw new HttpError(400, `Expected "${field}" to be a string.`);
@@ -57,9 +67,15 @@ function requireString(value: unknown, field: string): string {
   return value;
 }
 
-function requireLedger(value: unknown): LedgerEntry[] {
+function requireLedger(value: unknown, maxEntries: number): LedgerEntry[] {
   if (!Array.isArray(value)) {
     throw new HttpError(400, 'Expected "ledger" to be an array of ledger entries.');
+  }
+  if (value.length > maxEntries) {
+    throw new HttpError(
+      413,
+      `Ledger has ${value.length} entries; the limit is ${maxEntries}.`
+    );
   }
   value.forEach((entry, index) => {
     if (typeof entry !== 'object' || entry === null) {
@@ -85,18 +101,54 @@ function requireLedger(value: unknown): LedgerEntry[] {
   return value as LedgerEntry[];
 }
 
+/**
+ * Turns an error into a response body a client is allowed to see.
+ *
+ * Exported so it can be mounted on a throwaway app behind a route that throws
+ * on purpose. Reaching the 500 branch through the real routes is not really
+ * possible — they validate their input and every remaining failure is a 4xx —
+ * so a test that only posts bad input proves nothing about what an unexpected
+ * error returns, which is precisely the case worth pinning down.
+ */
+export function errorHandler(
+  err: Error & { status?: number },
+  _req: Request,
+  res: Response,
+  _next: NextFunction
+): void {
+  // express's own body parsers set `status` too, so malformed JSON stays a
+  // 400 and an oversized body stays a 413 instead of all becoming 500s.
+  const status =
+    typeof err.status === 'number' && err.status >= 400 && err.status < 500 ? err.status : 500;
+
+  if (status === 500) {
+    // Never return `err.stack` or an internal message: it hands a caller the
+    // file layout and internals of a financial service. Log it instead.
+    console.error('[ledger-reconcile] unhandled error', err);
+    res.status(500).json({ error: 'Internal Server Error' });
+    return;
+  }
+
+  const safe = err instanceof HttpError || err instanceof CsvParseError;
+  const fallback =
+    status === 413 ? 'Payload Too Large' : status === 401 ? 'Unauthorized' : 'Bad Request';
+  res.status(status).json({ error: safe ? err.message : fallback });
+}
+
 export function createServer(options: ServerOptions = {}) {
   const {
     apiToken,
     bodyLimit = DEFAULT_BODY_LIMIT,
     maxStatementLines = DEFAULT_MAX_STATEMENT_LINES,
+    maxLedgerEntries = DEFAULT_MAX_LEDGER_ENTRIES,
   } = options;
 
   const app = express();
 
-  app.use(express.text({ type: 'text/csv', limit: bodyLimit }));
-  app.use(express.json({ limit: bodyLimit }));
-
+  // Authentication runs before the body parsers, not after. Registered the
+  // other way round, an anonymous caller still gets the whole body buffered
+  // and JSON-parsed on their behalf before being told to go away — which is
+  // the cheap half of a denial of service, available without a token.
   if (apiToken) {
     app.use((req: Request, _res: Response, next: NextFunction) => {
       const header = req.get('authorization') ?? '';
@@ -108,9 +160,15 @@ export function createServer(options: ServerOptions = {}) {
     });
   }
 
+  app.use(express.text({ type: 'text/csv', limit: bodyLimit }));
+  app.use(express.json({ limit: bodyLimit }));
+
   const guardSize = (csv: string) => {
     // Cheap upper bound on the row count before any parsing work is done.
-    const approximateRows = csv.length === 0 ? 0 : csv.split('\n').length;
+    // Counting only "\n" would undercount a classic-Mac style file, where a
+    // bare "\r" ends the line — the parser breaks rows on it, so the guard
+    // has to see it too or the bound is one the input can walk straight past.
+    const approximateRows = csv.length === 0 ? 0 : (csv.match(/\r\n|\r|\n/g)?.length ?? 0) + 1;
     if (approximateRows > maxStatementLines) {
       throw new HttpError(
         413,
@@ -127,7 +185,7 @@ export function createServer(options: ServerOptions = {}) {
       }
 
       const csv = requireString((body as Record<string, unknown>).csv, 'csv');
-      const ledger = requireLedger((body as Record<string, unknown>).ledger);
+      const ledger = requireLedger((body as Record<string, unknown>).ledger, maxLedgerEntries);
       guardSize(csv);
 
       const statement = parseStatementCsv(csv);
@@ -162,26 +220,7 @@ export function createServer(options: ServerOptions = {}) {
     }
   });
 
-  app.use((err: Error & { status?: number }, _req: Request, res: Response, _next: NextFunction) => {
-    // express's own body parsers set `status` too, so malformed JSON stays a
-    // 400 and an oversized body stays a 413 instead of all becoming 500s.
-    const status = typeof err.status === 'number' && err.status >= 400 && err.status < 500
-      ? err.status
-      : 500;
-
-    if (status === 500) {
-      // Never return `err.stack` or an internal message: it hands a caller the
-      // file layout and internals of a financial service. Log it instead.
-      console.error('[ledger-reconcile] unhandled error', err);
-      res.status(500).json({ error: 'Internal Server Error' });
-      return;
-    }
-
-    const safe = err instanceof HttpError || err instanceof CsvParseError;
-    const fallback =
-      status === 413 ? 'Payload Too Large' : status === 401 ? 'Unauthorized' : 'Bad Request';
-    res.status(status).json({ error: safe ? err.message : fallback });
-  });
+  app.use(errorHandler);
 
   return app;
 }
