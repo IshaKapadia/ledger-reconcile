@@ -34,6 +34,11 @@ export interface ServerOptions {
   maxStatementLines?: number;
   /** Largest ledger accepted, in entries. */
   maxLedgerEntries?: number;
+  /**
+   * Largest run accepted, as statement lines × ledger entries — the number of
+   * comparisons the matcher will make, which is the real cost of a request.
+   */
+  maxReconcileWork?: number;
 }
 
 /**
@@ -59,6 +64,19 @@ const DEFAULT_MAX_STATEMENT_LINES = 50_000;
  * small body that still takes the event loop away from everyone else.
  */
 const DEFAULT_MAX_LEDGER_ENTRIES = 50_000;
+
+/**
+ * The per-side limits bound memory and validation. They do not bound the run:
+ * 50,000 against 50,000 is 2.5 billion comparisons, which is seconds of a
+ * blocked event loop, not the "known, short cost" the limits were meant to
+ * buy. The product is the thing to cap, so it is capped here directly.
+ *
+ * Five million comparisons is a few tens of milliseconds, and covers the real
+ * shapes — a month of one account against a year of books. A workload past
+ * that wants an indexed matcher or a job queue and a worker; it does not want
+ * a larger number here, and saying so is more honest than quietly allowing it.
+ */
+const DEFAULT_MAX_RECONCILE_WORK = 5_000_000;
 
 function requireString(value: unknown, field: string): string {
   if (typeof value !== 'string') {
@@ -97,6 +115,13 @@ function requireLedger(value: unknown, maxEntries: number): LedgerEntry[] {
     if (direction !== 'debit' && direction !== 'credit') {
       throw new HttpError(400, `ledger[${index}].direction must be "debit" or "credit".`);
     }
+    // Optional, but if present it has to be a string: `matchesByReference`
+    // calls `.trim()` on it, so a number here is a TypeError inside the
+    // matcher — a 500 for what is plainly a malformed request.
+    const { reference } = entry as Partial<LedgerEntry>;
+    if (reference !== undefined && typeof reference !== 'string') {
+      throw new HttpError(400, `ledger[${index}].reference must be a string when present.`);
+    }
   });
   return value as LedgerEntry[];
 }
@@ -105,10 +130,10 @@ function requireLedger(value: unknown, maxEntries: number): LedgerEntry[] {
  * Turns an error into a response body a client is allowed to see.
  *
  * Exported so it can be mounted on a throwaway app behind a route that throws
- * on purpose. Reaching the 500 branch through the real routes is not really
- * possible — they validate their input and every remaining failure is a 4xx —
- * so a test that only posts bad input proves nothing about what an unexpected
- * error returns, which is precisely the case worth pinning down.
+ * on purpose. The 500 branch is for the failure nobody anticipated — by
+ * definition not something a crafted request reliably reaches — so a test that
+ * only posts bad input is testing the validators, not this. Posting bad input
+ * gets a 4xx, which is the point of the validators and is covered separately.
  */
 export function errorHandler(
   err: Error & { status?: number },
@@ -141,6 +166,7 @@ export function createServer(options: ServerOptions = {}) {
     bodyLimit = DEFAULT_BODY_LIMIT,
     maxStatementLines = DEFAULT_MAX_STATEMENT_LINES,
     maxLedgerEntries = DEFAULT_MAX_LEDGER_ENTRIES,
+    maxReconcileWork = DEFAULT_MAX_RECONCILE_WORK,
   } = options;
 
   const app = express();
@@ -189,6 +215,19 @@ export function createServer(options: ServerOptions = {}) {
       guardSize(csv);
 
       const statement = parseStatementCsv(csv);
+
+      // Checked once the statement row count is exact rather than estimated,
+      // and before `reconcile` is entered, because the cost being bounded is
+      // the one thing that cannot be interrupted once it has started.
+      const work = statement.length * ledger.length;
+      if (work > maxReconcileWork) {
+        throw new HttpError(
+          413,
+          `Reconciling ${statement.length} statement lines against ${ledger.length} ` +
+            `ledger entries is ${work} comparisons; the limit is ${maxReconcileWork}.`
+        );
+      }
+
       const result = reconcile(statement, ledger);
 
       res.json({

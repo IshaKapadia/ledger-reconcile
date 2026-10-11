@@ -76,12 +76,9 @@ describe('parseStatementCsv', () => {
     });
   });
 
-  // `Number('8.29') === 8.29`, so asserting that on a bare "8.29" would pass
-  // whatever the parser did with the paise. These two put the decimal behind
-  // something that has to be undone first, and pin the boundary at a paisa.
-  it('keeps the paise on a grouped amount', () => {
-    const grouped = ['Date,Narration,Withdrawal,Deposit', '2026-04-12,FEE,"1,234.56",'].join('\n');
-    expect(parseStatementCsv(grouped)[0].amount).toBe(1234.56);
+  it('accepts trailing zeros, which are not precision', () => {
+    const padded = ['Date,Narration,Withdrawal,Deposit', '2026-04-12,RENT,"1,500.000",'].join('\n');
+    expect(parseStatementCsv(padded)[0].amount).toBe(1500);
   });
 
   it('refuses an amount finer than a paisa rather than rounding it', () => {
@@ -167,13 +164,28 @@ describe('parseStatementCsv', () => {
     });
 
     it('counts a narration that spans lines as the line it started on', () => {
+      // The wrapped row is the one that fails, so this pins rowStartLine for
+      // that row rather than only for the rows after it. The blank line is
+      // what makes the assertion worth making: the wrapped row is third in
+      // the filtered array, so the old index-based number would say Row 3,
+      // and it begins on line 4.
       const wrapped = [
         'Date,Narration,Withdrawal,Deposit',
-        '2026-04-10,"UPI/ACME',
-        'SUPPLIES",1500,',
-        '2026-04-30,CLOSING BALANCE,,',
+        '2026-04-10,RENT,500,',
+        '',
+        '2026-04-30,"UPI/ACME',
+        'SUPPLIES",,',
       ].join('\n');
       expect(() => parseStatementCsv(wrapped)).toThrow(/Row 4: no amount/);
+    });
+
+    it('refuses a date that is not an ISO date instead of failing in the matcher', () => {
+      const slashes = [
+        'Date,Narration,Withdrawal,Deposit',
+        '10/04/2026,UPI/ACME,1500,',
+      ].join('\n');
+      expect(() => parseStatementCsv(slashes)).toThrow(CsvParseError);
+      expect(() => parseStatementCsv(slashes)).toThrow(/Row 2: date is not an ISO date/);
     });
 
     it('refuses a row with a blank date', () => {

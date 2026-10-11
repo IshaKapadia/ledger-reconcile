@@ -1,4 +1,4 @@
-import { round2 } from './money';
+import { isIsoDate } from './dates';
 import { Direction, StatementLine } from './types';
 
 /**
@@ -158,26 +158,33 @@ function resolveColumns(header: string[]): Partial<Record<CanonicalColumn, numbe
  * are stripped before parsing: `parseFloat` stops at the first comma and would
  * read that figure as 1.
  *
- * Anything finer than a paisa is rejected rather than rounded. Rounding here
- * would be the import boundary quietly changing a figure the bank printed, and
- * the run would then reconcile against a number that is not on the statement;
- * two decimal places is the whole of what a rupee amount can carry, so a third
- * means the file is not what this parser thinks it is.
+ * A figure carrying real precision finer than a paisa is rejected rather than
+ * rounded. Rounding here would be the import boundary quietly changing a
+ * number the bank printed, and the run would then reconcile against a figure
+ * that is not on the statement. Trailing zeros are not precision — a bank that
+ * prints "1500.000" has said exactly 1500 — so those are accepted.
+ *
+ * Note there is no rounding call on the way out, and there is deliberately
+ * nothing for one to do: the pattern below admits at most two significant
+ * decimal places, and `Number` on such a string is already the nearest double
+ * to it. A `round2` here would return its own argument.
  */
+const AMOUNT = /^-?\d+(\.\d{1,2}0*)?$/;
+
 function parseAmount(raw: string | undefined, column: string, rowNumber: number): number {
   const text = (raw ?? '').replace(/[\s,₹]/g, '');
   if (text === '') {
     return 0;
   }
-  if (!/^-?\d+(\.\d{1,2})?$/.test(text)) {
+  if (!AMOUNT.test(text)) {
+    // Anything with three or more decimals that got this far has a non-zero
+    // one among them, because trailing zeros are accepted above.
     const reason = /^-?\d+\.\d{3,}$/.test(text)
       ? 'carries more precision than a paisa'
       : 'is not an amount';
-    throw new CsvParseError(
-      `Row ${rowNumber}: ${column} ${reason} (${JSON.stringify(raw)}).`
-    );
+    throw new CsvParseError(`Row ${rowNumber}: ${column} ${reason} (${JSON.stringify(raw)}).`);
   }
-  return round2(Number(text));
+  return Number(text);
 }
 
 function requireField(
@@ -247,7 +254,11 @@ export function parseStatementCsv(csv: string): StatementLine[] {
 
     // A reversal is sometimes posted as a negative in the original column, so
     // the net decides the direction rather than the column it arrived in.
-    const net = round2(debit - credit);
+    //
+    // No rounding on this either: a row with both columns filled is refused
+    // above, so one of these two is always exactly 0, and subtracting zero —
+    // or subtracting from zero — is exact. There is no drift to mop up.
+    const net = debit - credit;
     if (net === 0) {
       throw new CsvParseError(
         `Row ${rowNumber}: no amount. A carried-forward or total row cannot be ` +
@@ -259,11 +270,23 @@ export function parseStatementCsv(csv: string): StatementLine[] {
     const reference =
       columns.reference === undefined ? undefined : fields[columns.reference] || undefined;
 
+    // The rest of the library takes "date is an ISO date" as given — the
+    // matcher hands it straight to `toUtcTimestamp`, which throws a plain
+    // Error on anything else. A statement printing `10/04/2026` is a file this
+    // parser cannot read, which is this module's job to say, rather than
+    // something for the matcher to fall over on three calls later.
+    const date = requireField(fields, columns.date, 'date', rowNumber);
+    if (!isIsoDate(date)) {
+      throw new CsvParseError(
+        `Row ${rowNumber}: date is not an ISO date (YYYY-MM-DD): ${JSON.stringify(date)}.`
+      );
+    }
+
     parsed.push({
       // Keyed on the line of the file, so an id points at something a person
       // can find in the statement they uploaded.
       id: `csv-${rowNumber}`,
-      date: requireField(fields, columns.date, 'date', rowNumber),
+      date,
       description: requireField(fields, columns.description, 'narration', rowNumber),
       amount: Math.abs(net),
       direction,

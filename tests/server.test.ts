@@ -129,6 +129,48 @@ describe('POST /api/reconcile', () => {
       expect((await json(res)).error).toMatch(/Ledger has 20 entries/);
     });
   });
+
+  it('answers 413 when the work is too large even though each side is inside its limit', async () => {
+    // 4 lines and 4 entries: both well under their own caps, 16 comparisons
+    // over a limit of 10. The per-side limits cannot express this, which is
+    // the whole reason the product is bounded separately.
+    await withServer(
+      { maxStatementLines: 100, maxLedgerEntries: 100, maxReconcileWork: 10 },
+      async (baseUrl) => {
+        const statement = ['Date,Narration,Withdrawal,Deposit']
+          .concat(Array.from({ length: 4 }, (_, i) => `2026-04-10,ROW ${i},1,`))
+          .join('\n');
+        const entries = Array.from({ length: 4 }, (_, i) => ({ ...ledger[0], id: `L${i}` }));
+        const res = await postJson(baseUrl, '/api/reconcile', { csv: statement, ledger: entries });
+        expect(res.status).toBe(413);
+        expect((await json(res)).error).toMatch(/is 16 comparisons; the limit is 10/);
+      }
+    );
+  });
+
+  it('answers 400, not 500, for a statement date that is not an ISO date', async () => {
+    await withServer({}, async (baseUrl) => {
+      const res = await postJson(baseUrl, '/api/reconcile', {
+        csv: 'Date,Narration,Withdrawal,Deposit\n10/04/2026,ACME,1500,',
+        ledger,
+      });
+      expect(res.status).toBe(400);
+      expect((await json(res)).error).toMatch(/not an ISO date/);
+    });
+  });
+
+  it('answers 400, not 500, for a ledger reference that is not a string', async () => {
+    // matchesByReference calls .trim() on it, so a number used to reach the
+    // matcher and come back as a 500 on a plainly malformed request.
+    await withServer({}, async (baseUrl) => {
+      const res = await postJson(baseUrl, '/api/reconcile', {
+        csv,
+        ledger: [{ ...ledger[0], reference: 123 }],
+      });
+      expect(res.status).toBe(400);
+      expect((await json(res)).error).toMatch(/ledger\[0\]\.reference/);
+    });
+  });
 });
 
 describe('errorHandler', () => {
