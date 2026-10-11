@@ -98,19 +98,22 @@ export function ReconciliationDashboard({
   );
   const ledgerById = useMemo(() => new Map(ledger.map((entry) => [entry.id, entry])), [ledger]);
 
-  const needle = search.trim().toLowerCase();
+  // One term drives both the filter and the highlighting, so a row can never
+  // match the search without showing the user why.
+  const term = search.trim();
+  const needle = term.toLowerCase();
 
-  // Sorting by the signed amount keeps debits and credits in separate blocks
-  // instead of interleaving two rows that render differently but sort equal.
+  // Biggest first, by size rather than by sign. This is a work queue — the
+  // 50,000 item is the one to deal with first whichever way the money went —
+  // and direction is already legible from its own column.
+  const bySizeDescending = (a: { amount: number }, b: { amount: number }) => b.amount - a.amount;
+
   const visibleStatement = useMemo(
     () =>
       result.unmatchedStatement
         .filter((line) => !needle || line.description.toLowerCase().includes(needle))
         .slice()
-        .sort(
-          (a, b) =>
-            signedAmount(b.amount, b.direction) - signedAmount(a.amount, a.direction)
-        ),
+        .sort(bySizeDescending),
     [result.unmatchedStatement, needle]
   );
 
@@ -119,10 +122,7 @@ export function ReconciliationDashboard({
       result.unmatchedLedger
         .filter((entry) => !needle || entry.description.toLowerCase().includes(needle))
         .slice()
-        .sort(
-          (a, b) =>
-            signedAmount(b.amount, b.direction) - signedAmount(a.amount, a.direction)
-        ),
+        .sort(bySizeDescending),
     [result.unmatchedLedger, needle]
   );
 
@@ -152,20 +152,23 @@ export function ReconciliationDashboard({
    */
   const handleRowClick = useCallback(
     (side: Side, id: string) => {
-      setSelected((current) => {
-        if (!current) {
-          return { side, id };
-        }
-        if (current.side === side) {
-          return current.id === id ? null : { side, id };
-        }
-        const statementId = side === 'statement' ? id : current.id;
-        const ledgerId = side === 'ledger' ? id : current.id;
-        onManualMatch?.(statementId, ledgerId);
-        return null;
-      });
+      // `selected` is read from the closure and the callback fired here rather
+      // than inside a state updater: React may run an updater more than once,
+      // which would hand the parent the same pairing twice.
+      if (!selected) {
+        setSelected({ side, id });
+        return;
+      }
+      if (selected.side === side) {
+        setSelected(selected.id === id ? null : { side, id });
+        return;
+      }
+      const statementId = side === 'statement' ? id : selected.id;
+      const ledgerId = side === 'ledger' ? id : selected.id;
+      setSelected(null);
+      onManualMatch?.(statementId, ledgerId);
     },
-    [onManualMatch]
+    [selected, onManualMatch]
   );
 
   const isSelected = (side: Side, id: string) =>
@@ -214,7 +217,7 @@ export function ReconciliationDashboard({
                 aria-selected={isSelected('statement', line.id)}
               >
                 <td>{line.date}</td>
-                <td>{highlight(line.description, search)}</td>
+                <td>{highlight(line.description, term)}</td>
                 <td>{line.direction}</td>
                 <AmountCell amount={line.amount} direction={line.direction} />
               </tr>
@@ -241,7 +244,7 @@ export function ReconciliationDashboard({
                 aria-selected={isSelected('ledger', entry.id)}
               >
                 <td>{entry.date}</td>
-                <td>{highlight(entry.description, search)}</td>
+                <td>{highlight(entry.description, term)}</td>
                 <td>{entry.direction}</td>
                 <AmountCell amount={entry.amount} direction={entry.direction} />
               </tr>
