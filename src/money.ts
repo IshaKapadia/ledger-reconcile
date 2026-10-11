@@ -15,9 +15,23 @@
 /** Smallest unit per major unit. 100 paise to the rupee. */
 const MINOR_UNITS_PER_MAJOR = 100;
 
-/** Convert major units to integer minor units. */
+/**
+ * Convert major units to integer minor units.
+ *
+ * Two things are deliberate here. First, we round rather than truncate:
+ * `0.29 * 100` is `28.999999999999996`, so truncating loses a paisa on a value
+ * that was exact in the statement. Second, the rounding is done on the
+ * magnitude and the sign reapplied, so a refund of -8.295 rounds the same
+ * distance as a charge of 8.295 — `Math.round` on its own breaks ties towards
+ * positive infinity and would treat the two asymmetrically.
+ *
+ * The `toFixed` clears the representation noise before the rounding decision:
+ * `1.005 * 100` is `100.49999999999999`, which would otherwise round down.
+ */
 export function toMinorUnits(value: number): number {
-  return Math.trunc(value * MINOR_UNITS_PER_MAJOR);
+  const scaled = Math.abs(value) * MINOR_UNITS_PER_MAJOR;
+  const magnitude = Math.round(Number(scaled.toFixed(6)));
+  return value < 0 ? -magnitude : magnitude;
 }
 
 /** Convert integer minor units back to major units. */
@@ -44,7 +58,7 @@ export function sum(values: number[]): number {
  * Compared in minor units so float representation cannot separate them.
  */
 export function equalAmounts(a: number, b: number): boolean {
-  return Math.abs(toMinorUnits(a) - toMinorUnits(b)) <= 0;
+  return toMinorUnits(a) === toMinorUnits(b);
 }
 
 /** Format an amount for display, in Indian digit grouping. */
@@ -58,5 +72,5 @@ export function formatAmount(value: number, currency = 'INR'): string {
 
 /** Format a minor-unit amount for display. */
 export function formatMinorUnits(minor: number, currency = 'INR'): string {
-  return formatAmount(minor, currency);
+  return formatAmount(toMajorUnits(minor), currency);
 }
