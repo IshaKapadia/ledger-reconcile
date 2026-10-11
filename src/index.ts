@@ -4,3 +4,4 @@ export { findMatch, matchesByReference, matchesExactly } from './matcher';
 export { canonicalise, normaliseDescription, extractReference } from './normalize';
 export { round2, sum, equalAmounts, formatAmount } from './money';
 export { daysBetween, withinDays, isIsoDate } from './dates';
+export { parseStatementCsv, splitCsvLine } from './csv';
