@@ -1,4 +1,4 @@
-import { parseStatementCsv, splitCsvLine } from '../src/csv';
+import { CsvParseError, parseCsv, parseStatementCsv, splitCsvLine } from '../src/csv';
 
 describe('splitCsvLine', () => {
   it('splits a plain line', () => {
@@ -12,6 +12,23 @@ describe('splitCsvLine', () => {
 
   it('unescapes a doubled quote', () => {
     expect(splitCsvLine('"he said ""hi""",2')).toEqual(['he said "hi"', '2']);
+  });
+});
+
+describe('parseCsv', () => {
+  it('keeps a line break inside a quoted field on one row', () => {
+    const rows = parseCsv('Date,Narration\n2026-04-10,"UPI/ACME\nSUPPLIES"');
+    expect(rows).toEqual([
+      ['Date', 'Narration'],
+      ['2026-04-10', 'UPI/ACME\nSUPPLIES'],
+    ]);
+  });
+
+  it('reads CRLF line endings', () => {
+    expect(parseCsv('a,b\r\nc,d\r\n')).toEqual([
+      ['a', 'b'],
+      ['c', 'd'],
+    ]);
   });
 });
 
@@ -45,5 +62,95 @@ describe('parseStatementCsv', () => {
 
   it('returns nothing for an empty file', () => {
     expect(parseStatementCsv('')).toEqual([]);
+  });
+
+  // parseFloat stops at the first comma, so this used to read as ₹1.
+  it('reads an amount printed with Indian digit grouping', () => {
+    const grouped = [
+      'Date,Narration,Withdrawal,Deposit',
+      '2026-04-12,RENT,"1,50,000.00",',
+    ].join('\n');
+    expect(parseStatementCsv(grouped)[0]).toMatchObject({
+      amount: 150000,
+      direction: 'debit',
+    });
+  });
+
+  it('keeps an amount exact to the paisa', () => {
+    const paise = ['Date,Narration,Withdrawal,Deposit', '2026-04-12,FEE,8.29,'].join('\n');
+    expect(parseStatementCsv(paise)[0].amount).toBe(8.29);
+  });
+
+  it('treats a negative withdrawal as a reversal, not a zero credit', () => {
+    const reversal = [
+      'Date,Narration,Withdrawal,Deposit',
+      '2026-04-13,CHARGES REVERSED,-250,',
+    ].join('\n');
+    expect(parseStatementCsv(reversal)[0]).toMatchObject({
+      amount: 250,
+      direction: 'credit',
+    });
+  });
+
+  it('prefers the value date over another date column', () => {
+    const twoDates = [
+      'Txn Date,Value Date,Narration,Withdrawal,Deposit',
+      '2026-04-10,2026-04-12,CHEQUE CLEARED,500,',
+    ].join('\n');
+    expect(parseStatementCsv(twoDates)[0].date).toBe('2026-04-12');
+  });
+
+  it('resolves aliases regardless of case and wording', () => {
+    const aliased = [
+      'VALUE DATE,particulars,Debit,Credit',
+      '2026-04-10,NEFT OUT,100,',
+    ].join('\n');
+    expect(parseStatementCsv(aliased)[0]).toMatchObject({
+      date: '2026-04-10',
+      description: 'NEFT OUT',
+      amount: 100,
+      direction: 'debit',
+    });
+  });
+
+  describe('rejects a statement it cannot read', () => {
+    it('names the missing columns rather than emitting undefined fields', () => {
+      const noDate = ['Narration,Withdrawal,Deposit', 'UPI/ACME,1500,'].join('\n');
+      expect(() => parseStatementCsv(noDate)).toThrow(CsvParseError);
+      expect(() => parseStatementCsv(noDate)).toThrow(/missing required column\(s\): date/);
+    });
+
+    it('refuses a row with no amount instead of inventing a zero credit', () => {
+      const totalRow = [
+        'Date,Narration,Withdrawal,Deposit',
+        '2026-04-10,UPI/ACME,1500,',
+        '2026-04-30,CLOSING BALANCE,,',
+      ].join('\n');
+      expect(() => parseStatementCsv(totalRow)).toThrow(/Row 3: no amount/);
+    });
+
+    it('refuses a row with both columns filled', () => {
+      const both = [
+        'Date,Narration,Withdrawal,Deposit',
+        '2026-04-10,ODD ROW,100,200',
+      ].join('\n');
+      expect(() => parseStatementCsv(both)).toThrow(/both withdrawal and deposit/);
+    });
+
+    it('refuses a non-numeric amount rather than producing NaN', () => {
+      const text = [
+        'Date,Narration,Withdrawal,Deposit',
+        '2026-04-10,ODD ROW,n/a,',
+      ].join('\n');
+      expect(() => parseStatementCsv(text)).toThrow(/is not an amount/);
+    });
+
+    it('refuses a row with a blank date', () => {
+      const blank = [
+        'Date,Narration,Withdrawal,Deposit',
+        ',UPI/ACME,1500,',
+      ].join('\n');
+      expect(() => parseStatementCsv(blank)).toThrow(/Row 2: date is missing/);
+    });
   });
 });
