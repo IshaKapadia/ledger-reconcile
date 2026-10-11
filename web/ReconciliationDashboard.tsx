@@ -127,6 +127,8 @@ export function ReconciliationDashboard({
   );
 
   // A match is kept when either narration matches, because both are on screen.
+  // Both cells are highlighted, so which of the two matched is visible rather
+  // than something the user has to work out.
   // A match whose line is missing from the supplied arrays is still shown — it
   // is a real pairing, and hiding it made the tab count disagree with the rows.
   const visibleMatches = useMemo(
@@ -266,8 +268,8 @@ export function ReconciliationDashboard({
           <tbody>
             {visibleMatches.map((match) => (
               <tr key={`${match.statementId}:${match.ledgerId}`}>
-                <td>{statementById.get(match.statementId)?.description ?? '—'}</td>
-                <td>{ledgerById.get(match.ledgerId)?.description ?? '—'}</td>
+                <td>{highlight(statementById.get(match.statementId)?.description ?? '—', term)}</td>
+                <td>{highlight(ledgerById.get(match.ledgerId)?.description ?? '—', term)}</td>
                 <td>{match.strategy}</td>
                 <td>{Math.round(match.confidence * 100)}%</td>
               </tr>
