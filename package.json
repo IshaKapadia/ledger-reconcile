@@ -1,0 +1,27 @@
+{
+  "name": "ledger-reconcile",
+  "version": "0.1.0",
+  "description": "Reconcile bank statement transactions against ledger entries.",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "reconciliation",
+    "bank-statement",
+    "accounting",
+    "ledger"
+  ],
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.11.30",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.2",
+    "typescript": "^5.4.3"
+  }
+}
