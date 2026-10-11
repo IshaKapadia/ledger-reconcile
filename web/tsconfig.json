@@ -1,0 +1,18 @@
+{
+  // The browser half of the project compiles separately from the library.
+  //
+  // `src/` runs under Node. If the DOM lib is on for the whole project then
+  // `window`, `document` and `localStorage` typecheck inside the library too,
+  // and a reference to one of them compiles cleanly and throws a ReferenceError
+  // at runtime instead of failing the build. Keeping the DOM lib scoped to
+  // `web/` is what makes that a compile error again.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2020", "DOM"],
+    "jsx": "react-jsx",
+    "rootDir": "..",
+    "outDir": "../dist"
+  },
+  "include": ["**/*.tsx", "**/*.ts", "../src/**/*.ts"],
+  "exclude": ["../node_modules", "../dist"]
+}
